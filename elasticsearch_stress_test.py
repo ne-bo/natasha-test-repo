@@ -12,6 +12,7 @@ import sys
 import argparse
 
 # Import threading essentials
+import threading
 from threading import Lock, Thread, Condition, Event
 
 # For randomizing
@@ -27,6 +28,11 @@ import sys
 # For json operations
 import json
 
+import boto3
+
+from elasticsearch import Elasticsearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
+
 # Try and import elasticsearch
 try:
     from elasticsearch import Elasticsearch
@@ -37,42 +43,42 @@ except:
     sys.exit(1)
 
 # Set a parser object
-parser = argparse.ArgumentParser()
+#parser = argparse.ArgumentParser()
 
 # Adds all params
-parser.add_argument("--es_address", nargs='+', help="The address of your cluster (no protocol or port)", required=True)
-parser.add_argument("--indices", type=int, help="The number of indices to write to for each ip", required=True)
-parser.add_argument("--documents", type=int, help="The number different documents to write for each ip", required=True)
-parser.add_argument("--clients", type=int, help="The number of clients to write from for each ip", required=True)
-parser.add_argument("--seconds", type=int, help="The number of seconds to run for each ip", required=True)
-parser.add_argument("--number-of-shards", type=int, default=3, help="Number of shards per index (default 3)")
-parser.add_argument("--number-of-replicas", type=int, default=1, help="Number of replicas per index (default 1)")
-parser.add_argument("--bulk-size", type=int, default=1000, help="Number of document per request (default 1000)")
-parser.add_argument("--max-fields-per-document", type=int, default=100,
-                    help="Max number of fields in each document (default 100)")
-parser.add_argument("--max-size-per-field", type=int, default=1000, help="Max content size per field (default 1000")
-parser.add_argument("--no-cleanup", default=False, action='store_true', help="Don't delete the indices upon finish")
-parser.add_argument("--stats-frequency", type=int, default=30,
-                    help="Number of seconds to wait between stats prints (default 30)")
-parser.add_argument("--not-green", dest="green", action="store_false")
-parser.set_defaults(green=True)
+#parser.add_argument("--es_address", nargs='+', help="The address of your cluster (no protocol or port)", required=True)
+#parser.add_argument("--indices", type=int, help="The number of indices to write to for each ip", required=True)
+#parser.add_argument("--documents", type=int, help="The number different documents to write for each ip", required=True)
+#parser.add_argument("--clients", type=int, help="The number of clients to write from for each ip", required=True)
+#parser.add_argument("--seconds", type=int, help="The number of seconds to run for each ip", required=True)
+#parser.add_argument("--number-of-shards", type=int, default=3, help="Number of shards per index (default 3)")
+#parser.add_argument("--number-of-replicas", type=int, default=1, help="Number of replicas per index (default 1)")
+#parser.add_argument("--bulk-size", type=int, default=1000, help="Number of document per request (default 1000)")
+#parser.add_argument("--max-fields-per-document", type=int, default=100,
+#                    help="Max number of fields in each document (default 100)")
+#parser.add_argument("--max-size-per-field", type=int, default=1000, help="Max content size per field (default 1000")
+#parser.add_argument("--no-cleanup", default=False, action='store_true', help="Don't delete the indices upon finish")
+#parser.add_argument("--stats-frequency", type=int, default=30,
+#                    help="Number of seconds to wait between stats prints (default 30)")
+#parser.add_argument("--not-green", dest="green", action="store_false")
+#parser.set_defaults(green=True)
 
 # Parse the arguments
-args = parser.parse_args()
+#args = parser.parse_args()
 
 # Set variables from argparse output (for readability)
-NUMBER_OF_INDICES = args.indices
-NUMBER_OF_DOCUMENTS = args.documents
-NUMBER_OF_CLIENTS = args.clients
-NUMBER_OF_SECONDS = args.seconds
-NUMBER_OF_SHARDS = args.number_of_shards
-NUMBER_OF_REPLICAS = args.number_of_replicas
-BULK_SIZE = args.bulk_size
-MAX_FIELDS_PER_DOCUMENT = args.max_fields_per_document
-MAX_SIZE_PER_FIELD = args.max_size_per_field
-NO_CLEANUP = args.no_cleanup
-STATS_FREQUENCY = args.stats_frequency
-WAIT_FOR_GREEN = args.green
+#NUMBER_OF_INDICES = args.indices
+#NUMBER_OF_DOCUMENTS = args.documents
+#NUMBER_OF_CLIENTS = args.clients
+#NUMBER_OF_SECONDS = args.seconds
+#NUMBER_OF_SHARDS = args.number_of_shards
+#NUMBER_OF_REPLICAS = args.number_of_replicas
+#BULK_SIZE = args.bulk_size
+#MAX_FIELDS_PER_DOCUMENT = args.max_fields_per_document
+#MAX_SIZE_PER_FIELD = args.max_size_per_field
+#NO_CLEANUP = args.no_cleanup
+#STATS_FREQUENCY = args.stats_frequency
+#WAIT_FOR_GREEN = args.green
 
 # timestamp placeholder
 STARTED_TIMESTAMP = 0
@@ -136,7 +142,7 @@ def increment_size(size):
         size_lock.release()
 
 
-def has_timeout(STARTED_TIMESTAMP):
+def has_timeout(STARTED_TIMESTAMP, NUMBER_OF_SECONDS):
     # Match to the timestamp
     if (STARTED_TIMESTAMP + NUMBER_OF_SECONDS) > int(time.time()):
         return False
@@ -159,19 +165,19 @@ def generate_random_string(max_size):
 
 
 # Create a document template
-def generate_document():
+def generate_document(MAX_FIELDS_PER_DOCUMENT, MAX_SIZE_PER_FIELD):
     temp_doc = {}
 
     # Iterate over the max fields
     for _ in range(generate_random_int(MAX_FIELDS_PER_DOCUMENT)):
         # Generate a field, with random content
         temp_doc[generate_random_string(10)] = generate_random_string(MAX_SIZE_PER_FIELD)
-
+        #print("created document ", temp_doc)
     # Return the created document
     return temp_doc
 
 
-def fill_documents(documents_templates):
+def fill_documents(documents_templates, MAX_SIZE_PER_FIELD):
     # Generating 10 random subsets
     for _ in range(10):
 
@@ -188,9 +194,9 @@ def fill_documents(documents_templates):
         documents.append(temp_doc)
 
 
-def client_worker(es, indices, STARTED_TIMESTAMP):
+def client_worker(es, indices, STARTED_TIMESTAMP, NUMBER_OF_SECONDS, BULK_SIZE):
     # Running until timeout
-    while (not has_timeout(STARTED_TIMESTAMP)) and (not shutdown_event.is_set()):
+    while (not has_timeout(STARTED_TIMESTAMP, NUMBER_OF_SECONDS)) and (not shutdown_event.is_set()):
 
         curr_bulk = ""
 
@@ -205,6 +211,7 @@ def client_worker(es, indices, STARTED_TIMESTAMP):
             es.bulk(body=curr_bulk)
 
             # Adding to success bulks
+            print("before increment success")
             increment_success()
 
             # Adding to size (in bytes)
@@ -216,13 +223,13 @@ def client_worker(es, indices, STARTED_TIMESTAMP):
             increment_failure()
 
 
-def generate_clients(es, indices, STARTED_TIMESTAMP):
+def generate_clients(es, indices, STARTED_TIMESTAMP, NUMBER_OF_CLIENTS, NUMBER_OF_SECONDS, BULK_SIZE):
     # Clients placeholder
     temp_clients = []
 
     # Iterate over the clients count
     for _ in range(NUMBER_OF_CLIENTS):
-        temp_thread = Thread(target=client_worker, args=[es, indices, STARTED_TIMESTAMP])
+        temp_thread = Thread(target=client_worker, args=[es, indices, STARTED_TIMESTAMP, NUMBER_OF_SECONDS, BULK_SIZE])
         temp_thread.daemon = True
 
         # Create a thread and push it to the list
@@ -232,20 +239,20 @@ def generate_clients(es, indices, STARTED_TIMESTAMP):
     return temp_clients
 
 
-def generate_documents():
+def generate_documents(MAX_FIELDS_PER_DOCUMENT, MAX_SIZE_PER_FIELD, NUMBER_OF_DOCUMENTS):
     # Documents placeholder
     temp_documents = []
 
     # Iterate over the clients count
     for _ in range(NUMBER_OF_DOCUMENTS):
         # Create a document and push it to the list
-        temp_documents.append(generate_document())
+        temp_documents.append(generate_document(MAX_FIELDS_PER_DOCUMENT, MAX_SIZE_PER_FIELD))
 
     # Return the documents
     return temp_documents
 
 
-def generate_indices(es):
+def generate_indices(es, NUMBER_OF_INDICES, NUMBER_OF_SHARDS, NUMBER_OF_REPLICAS):
     # Placeholder
     temp_indices = []
 
@@ -281,7 +288,7 @@ def cleanup_indices(es, indices):
             print("Could not delete index: {0}. Continue anyway..".format(curr_index))
 
 
-def print_stats(STARTED_TIMESTAMP):
+def print_stats(STARTED_TIMESTAMP, BULK_SIZE):
     # Calculate elpased time
     elapsed_time = (int(time.time()) - STARTED_TIMESTAMP)
 
@@ -302,7 +309,7 @@ def print_stats(STARTED_TIMESTAMP):
     print("")
 
 
-def print_stats_worker(STARTED_TIMESTAMP):
+def print_stats_worker(STARTED_TIMESTAMP, BULK_SIZE, STATS_FREQUENCY, NUMBER_OF_SECONDS):
     # Create a conditional lock to be used instead of sleep (prevent dead locks)
     lock = Condition()
 
@@ -310,60 +317,74 @@ def print_stats_worker(STARTED_TIMESTAMP):
     lock.acquire()
 
     # Print the stats every STATS_FREQUENCY seconds
-    while (not has_timeout(STARTED_TIMESTAMP)) and (not shutdown_event.is_set()):
+    while (not has_timeout(STARTED_TIMESTAMP, NUMBER_OF_SECONDS)) and (not shutdown_event.is_set()):
 
         # Wait for timeout
         lock.wait(STATS_FREQUENCY)
 
         # To avoid double printing
-        if not has_timeout(STARTED_TIMESTAMP):
+        if not has_timeout(STARTED_TIMESTAMP, NUMBER_OF_SECONDS):
             # Print stats
-            print_stats(STARTED_TIMESTAMP)
+            print_stats(STARTED_TIMESTAMP, BULK_SIZE)
 
 
-def main():
+def stress_test(NUMBER_OF_INDICES, NUMBER_OF_DOCUMENTS, NUMBER_OF_CLIENTS, NUMBER_OF_SECONDS, NUMBER_OF_SHARDS,
+                NUMBER_OF_REPLICAS, BULK_SIZE, MAX_FIELDS_PER_DOCUMENT, MAX_SIZE_PER_FIELD,
+                NO_CLEANUP,STATS_FREQUENCY, WAIT_FOR_GREEN, es_addresses):
     clients = []
     all_indecies = []
 
     # Set the timestamp
     STARTED_TIMESTAMP = int(time.time())
 
-    for esaddress in args.es_address:
-        print("")
-        print("Starting initialization of {0}".format(esaddress))
-        try:
-            # Initiate the elasticsearch session
-            es = Elasticsearch(esaddress)
 
-        except Exception as e:
-            print("Could not connect to elasticsearch!")
-            sys.exit(1)
+    print("")
+    print("Starting initialization of {0}".format(es_addresses))
+    try:
+        # Initiate the elasticsearch session
+        host = 'search-natasha-domain-1-bx2wv5limgi43nvb7cti3o2dcu.us-west-2.es.amazonaws.com'
+        awsauth = AWS4Auth('AKIAIAUBLHXT6CTOAINQ', '54wbGsSXVTENCbEhyy3LzkcQPQgR/KUu/ugf01LS', 'us-west-2', 'es')
 
-        # Generate docs
-        documents_templates = generate_documents()
-        fill_documents(documents_templates)
+        es = Elasticsearch(
+            hosts=[{'host': host, 'port': 443}],
+            http_auth=awsauth,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection
+        )
+        print(es.info())
 
-        print("Done!")
-        print("Creating indices.. ")
+    except Exception as e:
+        print("Could not connect to elasticsearch!\n", e)
+        sys.exit(1)
 
-        indices = generate_indices(es)
-        all_indecies.extend(indices)
+    es.indices.delete('*')
 
-        try:
-            # wait for cluster to be green if nothing else is set
-            if WAIT_FOR_GREEN:
-                es.cluster.health(wait_for_status='green', master_timeout='600s', timeout='600s')
-        except Exception as e:
-            print("Cluster timeout....")
-            print("Cleaning up created indices.. "),
+    # Generate docs
+    documents_templates = generate_documents(MAX_FIELDS_PER_DOCUMENT, MAX_SIZE_PER_FIELD, NUMBER_OF_DOCUMENTS)
+    fill_documents(documents_templates, MAX_SIZE_PER_FIELD)
 
-            cleanup_indices(es, indices)
-            continue
+    print("Done!")
+    print("Creating indices.. ")
 
-        print("Generating documents and workers.. ")  # Generate the clients
-        clients.extend(generate_clients(es, indices, STARTED_TIMESTAMP))
+    indices = generate_indices(es, NUMBER_OF_INDICES, NUMBER_OF_SHARDS, NUMBER_OF_REPLICAS)
+    all_indecies.extend(indices)
 
-        print("Done!")
+    try:
+        # wait for cluster to be green if nothing else is set
+        if WAIT_FOR_GREEN:
+            es.cluster.health(wait_for_status='green', master_timeout='600s', timeout='600s')
+    except Exception as e:
+        print("Cluster timeout....")
+        print("Cleaning up created indices.. "),
+
+        cleanup_indices(es, indices)
+
+
+    print("Generating documents and workers.. ")  # Generate the clients
+    clients.extend(generate_clients(es, indices, STARTED_TIMESTAMP, NUMBER_OF_CLIENTS, NUMBER_OF_SECONDS, BULK_SIZE))
+
+    print("Done!")
 
     print("Starting the test. Will print stats every {0} seconds.".format(STATS_FREQUENCY))
     print("The test would run for {0} seconds, but it might take a bit more "
@@ -373,7 +394,7 @@ def main():
     map(lambda thread: thread.start(), clients)
 
     # Create and start the print stats thread
-    stats_thread = Thread(target=print_stats_worker, args=[STARTED_TIMESTAMP])
+    stats_thread = Thread(target=print_stats_worker, args=[STARTED_TIMESTAMP, BULK_SIZE, STATS_FREQUENCY, NUMBER_OF_SECONDS])
     stats_thread.daemon = True
     stats_thread.start()
 
@@ -390,7 +411,7 @@ def main():
                 flag = True
                 while flag:
                     # sleep 2 secs that we don't loop to often
-                    sleep(2)
+                    time.sleep(2)
                     # set loop flag to false. If there is no thread still alive it will stay false
                     flag = False
                     # loop through each running thread and check if it is alive
@@ -403,7 +424,7 @@ def main():
                 cleanup_indices(es, all_indecies)
 
     print("\nTest is done! Final results:")
-    print_stats(STARTED_TIMESTAMP)
+    print_stats(STARTED_TIMESTAMP, BULK_SIZE)
 
     # Cleanup, unless we are told not to
     if not NO_CLEANUP:
@@ -414,13 +435,3 @@ def main():
         print("Done!")  # # Main runner
 
 
-try:
-    main()
-
-except Exception as e:
-    print("Got unexpected exception. probably a bug, please report it.")
-    print("")
-    print(e.message)
-    print("")
-
-    sys.exit(1)
